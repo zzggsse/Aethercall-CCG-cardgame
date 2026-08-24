@@ -30,6 +30,7 @@ class Minion:
     frozen: bool = False
     divine_shield: bool = False
     dead: bool = False
+    silenced: bool = False
 
     @property
     def name(self) -> str:
@@ -83,6 +84,8 @@ class Player:
     power_used: bool = False
     is_ai: bool = False
     overdrawn: int = 0
+    traps: list[str] = field(default_factory=list)
+    spells_cast: int = 0
 
     @property
     def name(self) -> str:
@@ -97,7 +100,8 @@ class Game:
     """一局对战的状态机。"""
 
     def __init__(self, hero_a: str, hero_b: str, ai_second: bool = True,
-                 seed: int | None = None) -> None:
+                 seed: int | None = None, deck_a: list[str] | None = None,
+                 deck_b: list[str] | None = None) -> None:
         self.rng = random.Random(seed)
         self._uid = 0
         self.log: list[str] = []
@@ -105,8 +109,8 @@ class Game:
         self.winner: int | None = None
         self.finished = False
         self.players = [
-            self._make_player(0, hero_a, False),
-            self._make_player(1, hero_b, ai_second),
+            self._make_player(0, hero_a, False, deck_a),
+            self._make_player(1, hero_b, ai_second, deck_b),
         ]
         self.current = 0
         self._opening_draw()
@@ -114,9 +118,10 @@ class Game:
 
     # ---------- 初始化 ----------
 
-    def _make_player(self, index: int, hero_id: str, is_ai: bool) -> Player:
+    def _make_player(self, index: int, hero_id: str, is_ai: bool,
+                     deck_list: list[str] | None = None) -> Player:
         hero = HEROES[hero_id]
-        deck = [get_card(cid) for cid in hero.deck]
+        deck = [get_card(cid) for cid in (deck_list or hero.deck)]
         self.rng.shuffle(deck)
         return Player(index, HeroEntity(hero, index), deck, is_ai=is_ai)
 
@@ -172,8 +177,24 @@ class Game:
     def playable_cards(self, player: Player) -> list[Card]:
         return [c for c in player.hand if self.can_play(player, c)]
 
+    def effective_cost(self, player: Player, card: Card) -> int:
+        """实际消耗，考虑法术折扣与「本局法术数」折扣。"""
+        cost = card.cost
+        if card.is_spell:
+            discount = sum(1 for m in player.board
+                           if not m.dead and "spell_cost_down" in m.keywords)
+            if discount:
+                cost = max(1, cost - discount)
+        if "arcane_cost" in card.keywords:
+            cost = max(1, cost - player.spells_cast)
+        return max(0, cost)
+
+    def spell_power(self, player: Player) -> int:
+        """法术强度加成。"""
+        return sum(1 for m in player.board if not m.dead and "spell_power" in m.keywords)
+
     def can_play(self, player: Player, card: Card) -> bool:
-        if card.cost > player.mana:
+        if self.effective_cost(player, card) > player.mana:
             return False
         if card.is_minion and len(player.board) >= MAX_BOARD:
             return False
@@ -206,6 +227,10 @@ class Game:
             return theirs
         if mode == "damaged_enemy_minion":
             return [m for m in theirs if m.health < m.max_health]
+        if mode == "strong_minion":
+            return [m for m in [*mine, *theirs] if self.display_attack(m) >= 5]
+        if mode == "undamaged_minion":
+            return [m for m in [*mine, *theirs] if m.health >= m.max_health]
         if mode == "weak_minion":
             return [m for m in [*mine, *theirs] if self.display_attack(m) <= 3]
         return []
@@ -260,12 +285,13 @@ class Game:
             if target is None or target not in self.valid_targets(player, card.targeting):
                 return False
         player.hand.remove(card)
-        player.mana -= card.cost
+        player.mana -= self.effective_cost(player, card)
         if card.is_minion:
             minion = self.summon(player, card, position)
             self.logline(f"{player.name} 打出随从 {card.name}（{minion.attack}/{minion.health}）。")
             self.resolve_effects(player, card.effects, target, source=minion)
         else:
+            player.spells_cast += 1
             self.logline(f"{player.name} 施放法术 {card.name}。")
             self.resolve_effects(player, card.effects, target, source=None)
         self.cleanup()
@@ -279,6 +305,9 @@ class Game:
             keywords=set(card.keywords),
         )
         minion.divine_shield = "divine_shield" in minion.keywords
+        if any("aura_charge" in o.keywords for o in player.board
+               if o is not minion and not o.dead):
+            minion.keywords.add("charge")
         if "charge" in minion.keywords:
             minion.attacks_left = 1
             minion.can_attack = True
@@ -319,6 +348,8 @@ class Game:
         atk = self.display_attack(attacker)
         def_atk = 0 if defender.is_hero else self.display_attack(defender)
         self.logline(f"{attacker.name} 攻击 {defender.name}。")
+        if defender.is_hero:
+            self._trigger_traps(self.players[defender.owner])
         self.damage_character(defender, atk, source_name=attacker.name, source=attacker)
         if def_atk > 0:
             self.damage_character(attacker, def_atk, source_name=defender.name, source=defender)
@@ -329,6 +360,18 @@ class Game:
         self.cleanup()
         self.check_state()
         return True
+
+    def _trigger_traps(self, owner: Player) -> None:
+        """英雄被攻击时触发已布置的陷阱。"""
+        for trap in list(owner.traps):
+            if trap == "explosive":
+                owner.traps.remove(trap)
+                self.logline(f"{owner.name} 的爆炸陷阱触发！")
+                foe = self.opponent_of(owner)
+                for minion in list(foe.board):
+                    if not minion.dead:
+                        self.damage_character(minion, 2, source_name="爆炸陷阱")
+                self.cleanup()
 
     # ---------- 效果解析 ----------
 
@@ -362,8 +405,9 @@ class Game:
     def apply_effect(self, player: Player, effect: dict, chosen, source: Minion | None) -> None:
         kind = effect["type"]
         if kind == "damage":
+            bonus = self.spell_power(player)
             for target in self._resolve_target(player, effect["target"], chosen):
-                self.damage_character(target, effect["amount"], source_name="法术")
+                self.damage_character(target, effect["amount"] + bonus, source_name="法术")
         elif kind == "aoe":
             for target in list(self._resolve_target(player, effect["target"], chosen)):
                 self.damage_character(target, effect["amount"], source_name="范围效果")
@@ -439,6 +483,80 @@ class Game:
                     break
                 token = self.summon(player, get_card(effect["token"]))
                 self.logline(f"{player.name} 召唤了 {token.name}。")
+        elif kind == "give_mana":
+            gain = effect.get("amount", 1)
+            player.max_mana = min(MAX_MANA, player.max_mana + gain)
+            player.mana = min(player.max_mana, player.mana + gain)
+            self.logline(f"{player.name} 获得 {gain} 个法力水晶。")
+        elif kind == "silence":
+            for target in self._resolve_target(player, effect["target"], chosen):
+                if not target.is_hero:
+                    self.silence_minion(target)
+        elif kind == "set_attack_to_health":
+            for target in self._resolve_target(player, effect["target"], chosen):
+                if not target.is_hero:
+                    target.attack = target.health
+                    self.logline(f"{target.name} 的攻击力变为 {target.attack}。")
+        elif kind == "double_health":
+            for target in self._resolve_target(player, effect["target"], chosen):
+                if not target.is_hero:
+                    target.max_health += target.health
+                    target.health *= 2
+                    self.logline(f"{target.name} 的生命值翻倍至 {target.health}。")
+        elif kind == "random_buff":
+            pool = [m for m in self._resolve_target(player, effect["target"], chosen)
+                    if not m.is_hero and not m.dead]
+            if pool:
+                target = self.rng.choice(pool)
+                target.attack += effect.get("attack", 0)
+                gain = effect.get("health", 0)
+                target.max_health += gain
+                target.health += gain
+                self.logline(f"{target.name} 获得强化。")
+        elif kind == "armor_damage":
+            amount = player.hero_entity.armor
+            for target in self._resolve_target(player, effect["target"], chosen):
+                self.damage_character(target, amount, source_name="盾击")
+        elif kind == "conditional_damage":
+            base = effect["amount"]
+            for target in self._resolve_target(player, effect["target"], chosen):
+                final = base
+                if effect.get("if_frozen") and getattr(target, "frozen", False):
+                    final = effect["if_frozen"]
+                below = effect.get("if_hero_below")
+                if below and player.hero_entity.health <= below:
+                    final = effect.get("then", base)
+                self.damage_character(target, final, source_name="法术")
+        elif kind == "mark":
+            for target in self._resolve_target(player, effect["target"], chosen):
+                if not target.is_hero:
+                    target.keywords.add("marked")
+                    self.logline(f"{target.name} 被标记。")
+        elif kind == "trap_explosive":
+            player.traps.append("explosive")
+            self.logline(f"{player.name} 布置了一个陷阱。")
+        elif kind == "add_random_class_spells":
+            from .cards import CLASS_POOLS
+            pool = [c for c in CLASS_POOLS.get(effect.get("hero", ""), []) if c.is_spell]
+            for _ in range(effect.get("count", 1)):
+                if not pool or len(player.hand) >= MAX_HAND:
+                    break
+                card = self.rng.choice(pool)
+                player.hand.append(card)
+                self.logline(f"{player.name} 获得了 {card.name}。")
+
+    def silence_minion(self, minion: Minion) -> None:
+        """沉默：移除关键词、光环与亡语。"""
+        if "aura_health" in minion.keywords:
+            owner = self.players[minion.owner]
+            for other in owner.board:
+                if other is not minion and not other.dead:
+                    other.max_health = max(1, other.max_health - 1)
+                    other.health = min(other.health, other.max_health)
+        minion.keywords.clear()
+        minion.divine_shield = False
+        minion.silenced = True
+        self.logline(f"{minion.name} 被沉默。")
 
     # ---------- 伤害与治疗 ----------
 
@@ -463,6 +581,8 @@ class Game:
             self._on_minion_damaged(target)
 
     def _on_minion_damaged(self, target: Minion) -> None:
+        if "marked" in target.keywords:
+            target.health = 0
         for player in self.players:
             for minion in player.board:
                 if minion.dead:
@@ -508,7 +628,7 @@ class Game:
                     for other in player.board:
                         other.max_health = max(1, other.max_health - 1)
                         other.health = min(other.health, other.max_health)
-                if minion.card.deathrattle:
+                if minion.card.deathrattle and not minion.silenced:
                     self.resolve_effects(player, minion.card.deathrattle, None, None)
 
     def check_state(self) -> None:

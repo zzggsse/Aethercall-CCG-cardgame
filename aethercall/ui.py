@@ -6,7 +6,9 @@ import tkinter as tk
 from tkinter import font as tkfont
 
 from .ai import SimpleAI
-from .cards import HEROES, Card
+from .cards import (COLLECTIBLE, DECK_SIZE, HEROES, Card, buildable_pool,
+                    get_card, max_copies_of, validate_deck)
+from .decks import deck_for, delete_deck, has_custom, save_deck
 from .engine import Game, HeroEntity, Minion
 
 WIDTH, HEIGHT = 1180, 760
@@ -35,6 +37,11 @@ BOARD_MID = 300
 MY_ROW_Y = 312
 MY_HERO_Y = 444
 
+# 稀有度配色与名称
+RARITY_COLOR = {"common": "#9aa7bd", "rare": "#4a90e2",
+                "epic": "#a55eea", "legendary": "#e0a340"}
+RARITY_NAME = {"common": "普通", "rare": "稀有", "epic": "史诗", "legendary": "传说"}
+
 
 class CardGameApp:
     """游戏主窗口，负责菜单、渲染与交互。"""
@@ -57,6 +64,8 @@ class CardGameApp:
         self.canvas.bind("<Motion>", self.on_motion)
         self.root.bind("<space>", lambda _e: self.on_end_turn())
         self.root.bind("<Escape>", lambda _e: self.show_menu())
+        self.root.bind("<Left>", lambda _e: self.on_page(-1))
+        self.root.bind("<Right>", lambda _e: self.on_page(1))
 
         self.game: Game | None = None
         self.hitboxes: list[tuple[tuple[int, int, int, int], str, object]] = []
@@ -71,6 +80,15 @@ class CardGameApp:
         self.player_hero = "mage"
         self.enemy_hero = "hunter"
         self.ai_busy = False
+        self.screen = "menu"
+        self.col_page = 0
+        self.col_filter = "all"
+        self.detail_card: Card | None = None
+        self.builder_hero = "mage"
+        self.builder_cards: list[str] = []
+        self.builder_page = 0
+        self.builder_filter = "all"
+        self.toast = ""
         self.show_menu()
 
     # ---------- 通用绘制工具 ----------
@@ -98,9 +116,13 @@ class CardGameApp:
 
     # ---------- 菜单 ----------
 
+
+    # ---------- 主菜单 ----------
+
     def show_menu(self) -> None:
         self.game = None
         self.ai_busy = False
+        self.screen = "menu"
         self.render_menu()
 
     def render_menu(self) -> None:
@@ -108,54 +130,369 @@ class CardGameApp:
         c.delete("all")
         self.hitboxes = []
         c.create_rectangle(0, 0, WIDTH, HEIGHT, fill=BG, outline="")
-        c.create_text(WIDTH // 2, 90, text="灵 契 战 歌", fill=GOLD, font=self.f_title)
-        c.create_text(WIDTH // 2, 138, text="AETHERCALL · 单机 CCG 卡牌对战",
+        c.create_text(WIDTH // 2, 58, text="灵 契 战 歌", fill=GOLD, font=self.f_title)
+        c.create_text(WIDTH // 2, 100, text="AETHERCALL · 单机 CCG 卡牌对战",
                       fill=DIM, font=self.f_body)
-        c.create_text(WIDTH // 2, 196, text="选择你的英雄", fill=TEXT, font=self.f_head)
-        keys = list(HEROES)
-        gap, w, h = 30, 240, 200
-        total = len(keys) * w + (len(keys) - 1) * gap
-        x = (WIDTH - total) // 2
-        for key in keys:
-            hero = HEROES[key]
-            chosen = key == self.player_hero
-            self.rrect(x, 230, x + w, 230 + h, r=16,
-                       fill=PANEL, outline=GOLD if chosen else "#39435c",
-                       width=3 if chosen else 1)
-            c.create_text(x + w // 2, 268, text=hero.class_name, fill=GOLD, font=self.f_head)
-            c.create_text(x + w // 2, 300, text=hero.name, fill=TEXT, font=self.f_body)
-            c.create_text(x + w // 2, 340, text=f"技能：{hero.power_name}（{hero.power_cost}费）",
-                          fill=TEXT, font=self.f_small)
-            c.create_text(x + w // 2, 372, text=self.wrap(hero.power_text, w - 40),
-                          fill=DIM, font=self.f_small, justify="center")
-            c.create_text(x + w // 2, 408, text="✓ 已选择" if chosen else "点击选择",
-                          fill=GREEN if chosen else DIM, font=self.f_small)
-            self.add_hit((x, 230, x + w, 230 + h), "menu_hero", key)
-            x += w + gap
+        c.create_text(WIDTH // 2, 140,
+                      text=f"卡牌总数 {len(COLLECTIBLE)} 张 · {len(HEROES)} 个职业 · 可自由构筑套牌",
+                      fill="#7fb2ff", font=self.f_small)
 
-        c.create_text(WIDTH // 2, 476, text="选择对手英雄", fill=TEXT, font=self.f_head)
-        bx = (WIDTH - (len(keys) * 150 + (len(keys) - 1) * 20)) // 2
+        c.create_text(WIDTH // 2, 176, text="选择你的英雄", fill=TEXT, font=self.f_head)
+        keys = list(HEROES)
+        cols, w, h, gx, gy = 3, 250, 128, 24, 18
+        total_w = cols * w + (cols - 1) * gx
+        x0 = (WIDTH - total_w) // 2
+        for index, key in enumerate(keys):
+            hero = HEROES[key]
+            row, col = divmod(index, cols)
+            x = x0 + col * (w + gx)
+            y = 200 + row * (h + gy)
+            chosen = key == self.player_hero
+            self.rrect(x, y, x + w, y + h, r=14, fill=PANEL,
+                       outline=GOLD if chosen else "#39435c", width=3 if chosen else 1)
+            c.create_text(x + w // 2, y + 24, text=hero.class_name, fill=GOLD, font=self.f_head)
+            c.create_text(x + w // 2, y + 50, text=hero.name, fill=TEXT, font=self.f_small)
+            c.create_text(x + w // 2, y + 74,
+                          text=f"{hero.power_name}（{hero.power_cost}费）",
+                          fill="#9db2d6", font=self.f_small)
+            tag = "★ 自定义套牌" if has_custom(key) else "预组套牌"
+            c.create_text(x + w // 2, y + 100, text=("✓ " if chosen else "") + tag,
+                          fill=GREEN if chosen else DIM, font=self.f_small)
+            self.add_hit((x, y, x + w, y + h), "menu_hero", key)
+
+        oy = 200 + 2 * (h + gy) + 16
+        c.create_text(WIDTH // 2, oy, text="选择对手英雄（AI）", fill=TEXT, font=self.f_body)
+        bw, bgap = 128, 14
+        bx = (WIDTH - (len(keys) * bw + (len(keys) - 1) * bgap)) // 2
         for key in keys:
             hero = HEROES[key]
             chosen = key == self.enemy_hero
-            self.rrect(bx, 502, bx + 150, 552, r=10, fill="#2f3a52" if chosen else PANEL,
+            self.rrect(bx, oy + 20, bx + bw, oy + 60, r=10,
+                       fill="#2f3a52" if chosen else PANEL,
                        outline=RED if chosen else "#39435c", width=2 if chosen else 1)
-            c.create_text(bx + 75, 527, text=f"AI · {hero.class_name}",
-                          fill=TEXT if chosen else DIM, font=self.f_body)
-            self.add_hit((bx, 502, bx + 150, 552), "menu_enemy", key)
-            bx += 170
+            c.create_text(bx + bw // 2, oy + 40, text=hero.class_name,
+                          fill=TEXT if chosen else DIM, font=self.f_small)
+            self.add_hit((bx, oy + 20, bx + bw, oy + 60), "menu_enemy", key)
+            bx += bw + bgap
 
-        self.rrect(WIDTH // 2 - 130, 592, WIDTH // 2 + 130, 652, r=14, fill=GOLD, outline="")
-        c.create_text(WIDTH // 2, 622, text="开 始 对 战", fill="#1b2230", font=self.f_head)
-        self.add_hit((WIDTH // 2 - 130, 592, WIDTH // 2 + 130, 652), "menu_start", None)
-        c.create_text(WIDTH // 2, 700,
-                      text="操作：点击手牌出牌 → 点击目标；点击随从再点敌方单位进行攻击；空格结束回合，ESC 返回菜单",
+        by = oy + 88
+        buttons = [("开 始 对 战", "menu_start", GOLD, "#1b2230"),
+                   ("卡 牌 图 鉴", "menu_collection", "#3f7fd1", TEXT),
+                   ("牌 库 编 辑", "menu_builder", "#4caf6a", "#12281a")]
+        bw2, bgap2 = 210, 22
+        bx2 = (WIDTH - (len(buttons) * bw2 + (len(buttons) - 1) * bgap2)) // 2
+        for label, kind, fill, fg in buttons:
+            self.rrect(bx2, by, bx2 + bw2, by + 52, r=14, fill=fill, outline="")
+            c.create_text(bx2 + bw2 // 2, by + 26, text=label, fill=fg, font=self.f_head)
+            self.add_hit((bx2, by, bx2 + bw2, by + 52), kind, None)
+            bx2 += bw2 + bgap2
+
+        c.create_text(WIDTH // 2, by + 84,
+                      text="对战操作：鼠标移到手牌查看详情 → 点击出牌 → 点击目标；"
+                           "点击随从再点敌方单位攻击；空格结束回合，ESC 返回菜单",
                       fill=DIM, font=self.f_small)
 
-    # ---------- 开局 ----------
+    # ---------- 卡牌图鉴 ----------
+
+    def show_collection(self) -> None:
+        self.screen = "collection"
+        self.col_page = 0
+        self.col_filter = "all"
+        self.detail_card = None
+        self.render_collection()
+
+    def collection_cards(self) -> list[Card]:
+        pool = list(COLLECTIBLE)
+        if self.col_filter == "neutral":
+            pool = [c for c in pool if c.hero == "neutral"]
+        elif self.col_filter in HEROES:
+            pool = [c for c in pool if c.hero == self.col_filter]
+        elif self.col_filter == "minion":
+            pool = [c for c in pool if c.is_minion]
+        elif self.col_filter == "spell":
+            pool = [c for c in pool if c.is_spell]
+        return sorted(pool, key=lambda c: (c.cost, c.hero != "neutral", c.name))
+
+    def render_collection(self) -> None:
+        c = self.canvas
+        c.delete("all")
+        self.hitboxes = []
+        c.create_rectangle(0, 0, WIDTH, HEIGHT, fill=BG, outline="")
+        cards = self.collection_cards()
+        cols, rows = 6, 3
+        per = cols * rows
+        pages = max(1, (len(cards) + per - 1) // per)
+        self.col_page = max(0, min(self.col_page, pages - 1))
+
+        c.create_text(28, 26, text="卡 牌 图 鉴", anchor="w", fill=GOLD, font=self.f_head)
+        c.create_text(190, 28, text=f"共 {len(cards)} 张 · 第 {self.col_page + 1}/{pages} 页",
+                      anchor="w", fill=DIM, font=self.f_small)
+
+        filters = [("all", "全部"), ("neutral", "中立"), ("minion", "随从"), ("spell", "法术")]
+        filters += [(k, HEROES[k].class_name) for k in HEROES]
+        fx = 28
+        for key, label in filters:
+            active = self.col_filter == key
+            wf = max(52, self.f_small.measure(label) + 24)
+            self.rrect(fx, 48, fx + wf, 78, r=8, fill="#33507d" if active else PANEL,
+                       outline=GOLD if active else "#39435c", width=2 if active else 1)
+            c.create_text(fx + wf // 2, 63, text=label, fill=TEXT if active else DIM,
+                          font=self.f_small)
+            self.add_hit((fx, 48, fx + wf, 78), "col_filter", key)
+            fx += wf + 8
+
+        cw, ch, gx, gy = 176, 196, 14, 16
+        grid_w = cols * cw + (cols - 1) * gx
+        x0 = (WIDTH - grid_w) // 2
+        y0 = 96
+        page_cards = cards[self.col_page * per:(self.col_page + 1) * per]
+        for index, card in enumerate(page_cards):
+            row, col = divmod(index, cols)
+            x = x0 + col * (cw + gx)
+            y = y0 + row * (ch + gy)
+            self.draw_big_card(card, x, y, cw, ch)
+            self.add_hit((x, y, x + cw, y + ch), "col_card", card)
+
+        self.rrect(28, HEIGHT - 62, 148, HEIGHT - 20, r=12, fill=PANEL, outline="#39435c")
+        c.create_text(88, HEIGHT - 41, text="← 返回菜单", fill=TEXT, font=self.f_small)
+        self.add_hit((28, HEIGHT - 62, 148, HEIGHT - 20), "back_menu", None)
+        if pages > 1:
+            self.rrect(WIDTH // 2 - 130, HEIGHT - 62, WIDTH // 2 - 20, HEIGHT - 20, r=12,
+                       fill=PANEL, outline="#39435c")
+            c.create_text(WIDTH // 2 - 75, HEIGHT - 41, text="上一页", fill=TEXT,
+                          font=self.f_small)
+            self.add_hit((WIDTH // 2 - 130, HEIGHT - 62, WIDTH // 2 - 20, HEIGHT - 20),
+                         "col_prev", None)
+            self.rrect(WIDTH // 2 + 20, HEIGHT - 62, WIDTH // 2 + 130, HEIGHT - 20, r=12,
+                       fill=PANEL, outline="#39435c")
+            c.create_text(WIDTH // 2 + 75, HEIGHT - 41, text="下一页", fill=TEXT,
+                          font=self.f_small)
+            self.add_hit((WIDTH // 2 + 20, HEIGHT - 62, WIDTH // 2 + 130, HEIGHT - 20),
+                         "col_next", None)
+        c.create_text(WIDTH - 28, HEIGHT - 41, anchor="e",
+                      text="点击卡牌查看详情 · 左右方向键翻页 · ESC 返回",
+                      fill=DIM, font=self.f_small)
+        if self.detail_card is not None:
+            self.draw_card_detail(self.detail_card)
+
+    def draw_big_card(self, card: Card, x: int, y: int, w: int, h: int) -> None:
+        """图鉴/构筑用的完整卡面。"""
+        c = self.canvas
+        accent = RARITY_COLOR.get(card.rarity, "#39435c")
+        self.rrect(x, y, x + w, y + h, r=12, fill="#28324a", outline=accent, width=2)
+        self.rrect(x, y, x + w, y + 26, r=10, fill=accent, outline="")
+        cls = "中立" if card.hero == "neutral" else HEROES[card.hero].class_name
+        c.create_text(x + w // 2, y + 13, text=f"{cls} · {RARITY_NAME.get(card.rarity, '')}",
+                      fill="#10161f", font=self.f_small)
+        c.create_oval(x + 6, y + 32, x + 38, y + 64, fill="#2f6fd0", outline=GOLD)
+        c.create_text(x + 22, y + 48, text=str(card.cost), fill="#ffffff", font=self.f_body)
+        c.create_text(x + w // 2 + 12, y + 48, text=card.name, fill=TEXT, font=self.f_body,
+                      width=w - 52)
+        c.create_text(x + w // 2, y + 78, text="随从" if card.is_minion else "法术",
+                      fill=DIM, font=self.f_small)
+        c.create_text(x + w // 2, y + h // 2 + 34, text=self.wrap(card.text, w - 22),
+                      fill="#c2cee4", font=self.f_small, justify="center")
+        if card.is_minion:
+            c.create_text(x + 20, y + h - 18, text=str(card.attack), fill="#ffe6a7",
+                          font=self.f_stat)
+            c.create_text(x + w - 20, y + h - 18, text=str(card.health), fill="#7fe08a",
+                          font=self.f_stat)
+
+    def draw_card_detail(self, card: Card) -> None:
+        c = self.canvas
+        c.create_rectangle(0, 0, WIDTH, HEIGHT, fill="#000000", stipple="gray50", outline="")
+        w, h = 380, 460
+        x, y = (WIDTH - w) // 2, (HEIGHT - h) // 2
+        accent = RARITY_COLOR.get(card.rarity, GOLD)
+        self.rrect(x, y, x + w, y + h, r=18, fill=PANEL, outline=accent, width=3)
+        c.create_text(x + w // 2, y + 36, text=card.name, fill=GOLD, font=self.f_title)
+        cls = "中立" if card.hero == "neutral" else HEROES[card.hero].class_name
+        c.create_text(x + w // 2, y + 78,
+                      text=f"{cls} · {'随从' if card.is_minion else '法术'} · "
+                           f"{RARITY_NAME.get(card.rarity, '')}",
+                      fill=DIM, font=self.f_body)
+        c.create_oval(x + w // 2 - 26, y + 104, x + w // 2 + 26, y + 156,
+                      fill="#2f6fd0", outline=GOLD, width=2)
+        c.create_text(x + w // 2, y + 130, text=str(card.cost), fill="#ffffff",
+                      font=self.f_title)
+        c.create_text(x + w // 2, y + 176, text="法力消耗", fill=DIM, font=self.f_small)
+        if card.is_minion:
+            c.create_text(x + 96, y + 230, text=f"{card.attack}", fill="#ffe6a7",
+                          font=self.f_title)
+            c.create_text(x + 96, y + 264, text="攻击力", fill=DIM, font=self.f_small)
+            c.create_text(x + w - 96, y + 230, text=f"{card.health}", fill="#7fe08a",
+                          font=self.f_title)
+            c.create_text(x + w - 96, y + 264, text="生命值", fill=DIM, font=self.f_small)
+        c.create_text(x + w // 2, y + 320, text=self.wrap(card.text or "没有特殊效果。", w - 60),
+                      fill="#dbe5f5", font=self.f_body, justify="center")
+        limit = max_copies_of(card)
+        c.create_text(x + w // 2, y + 386, text=f"套牌中最多携带 {limit} 张",
+                      fill="#9db2d6", font=self.f_small)
+        self.rrect(x + w // 2 - 70, y + h - 62, x + w // 2 + 70, y + h - 22, r=12,
+                   fill=GOLD, outline="")
+        c.create_text(x + w // 2, y + h - 42, text="关闭", fill="#1b2230", font=self.f_body)
+        self.add_hit((x + w // 2 - 70, y + h - 62, x + w // 2 + 70, y + h - 22),
+                     "detail_close", None)
+    # ---------- 牌库编辑 ----------
+
+    def show_builder(self) -> None:
+        self.screen = "builder"
+        self.builder_hero = self.player_hero
+        self.builder_cards: list[str] = list(deck_for(self.builder_hero))
+        self.builder_page = 0
+        self.builder_filter = "all"
+        self.render_builder()
+
+    def builder_pool(self) -> list[Card]:
+        pool = buildable_pool(self.builder_hero)
+        flt = self.builder_filter
+        if flt == "minion":
+            pool = [c for c in pool if c.is_minion]
+        elif flt == "spell":
+            pool = [c for c in pool if c.is_spell]
+        elif flt in HEROES:
+            pool = [c for c in pool if c.hero == flt]
+        elif flt == "neutral":
+            pool = [c for c in pool if c.hero == "neutral"]
+        return sorted(pool, key=lambda c: (c.cost, c.hero != "neutral", c.name))
+
+    def render_builder(self) -> None:
+        c = self.canvas
+        c.delete("all")
+        self.hitboxes = []
+        c.create_rectangle(0, 0, WIDTH, HEIGHT, fill=BG, outline="")
+
+        hero = HEROES[self.builder_hero]
+        c.create_text(28, 26, text=f"牌 库 编 辑 · {hero.class_name}", anchor="w",
+                      fill=GOLD, font=self.f_head)
+        c.create_text(28, 56, anchor="w",
+                      text=f"{hero.name} · 可构筑卡牌 {len(buildable_pool(self.builder_hero))} 张",
+                      fill=DIM, font=self.f_small)
+
+        # 统计当前套牌
+        counts: dict[str, int] = {}
+        for cid in self.builder_cards:
+            counts[cid] = counts.get(cid, 0) + 1
+        ok, msg = validate_deck(self.builder_hero, self.builder_cards)
+        summary = f"当前：{len(self.builder_cards)} 张（需 {DECK_SIZE} 张）"
+        if ok:
+            c.create_text(WIDTH - 30, 26, anchor="e", text=summary, fill=GREEN, font=self.f_body)
+        else:
+            c.create_text(WIDTH - 30, 26, anchor="e", text=summary, fill=RED, font=self.f_body)
+            c.create_text(WIDTH - 30, 50, anchor="e", text=msg, fill=RED, font=self.f_small)
+
+        # 套牌列表（右侧，显示已选卡牌）
+        dw = 200
+        dx = WIDTH - dw - 20
+        self.rrect(dx, 70, dx + dw, HEIGHT - 70, r=12, fill="#1f2736", outline="#39435c")
+        c.create_text(dx + dw // 2, 88, text="当前套牌", fill=GOLD, font=self.f_small)
+        c.create_text(dx + dw // 2, 104, text=f"{len(self.builder_cards)} / {DECK_SIZE}",
+                      fill=GREEN if len(self.builder_cards) == DECK_SIZE else TEXT,
+                      font=self.f_small)
+        yy = 120
+        for cid in self.builder_cards:
+            card = get_card(cid)
+            c.create_text(dx + 12, yy, text=f"{card.name} x{counts.get(cid, '')}", anchor="w",
+                          fill=TEXT, font=self.f_small, width=dw - 24)
+            self.add_hit((dx, yy - 2, dx + dw, yy + 14), "builder_remove", cid)
+            yy += 15
+            if yy > HEIGHT - 24:
+                break
+
+        # 筛选器
+        flt = [("all", "全部"), ("minion", "随从"), ("spell", "法术"), ("neutral", "中立")]
+        flt += [(k, HEROES[k].class_name) for k in HEROES if k == self.builder_hero]
+        fx = 28
+        for key, label in flt:
+            active = self.builder_filter == key
+            wf = max(48, self.f_small.measure(label) + 20)
+            self.rrect(fx, 70, fx + wf, 96, r=8, fill="#33507d" if active else PANEL,
+                       outline=GOLD if active else "#39435c", width=2 if active else 1)
+            c.create_text(fx + wf // 2, 83, text=label, fill=TEXT if active else DIM,
+                          font=self.f_small)
+            self.add_hit((fx, 70, fx + wf, 96), "build_filter", key)
+            fx += wf + 8
+
+        # 可选卡牌网格
+        pool = self.builder_pool()
+        cols, rows = 4, 3
+        per = cols * rows
+        pages = max(1, (len(pool) + per - 1) // per)
+        self.builder_page = max(0, min(self.builder_page, pages - 1))
+        c.create_text(fx, 84, text=f"第 {self.builder_page + 1}/{pages} 页",
+                      anchor="w", fill=DIM, font=self.f_small)
+
+        cw, ch, gx, gy = 180, 136, 12, 12
+        grid_w = cols * cw + (cols - 1) * gx
+        x0 = (dx - grid_w) // 2
+        y0 = 106
+        page_cards = pool[self.builder_page * per:(self.builder_page + 1) * per]
+        for index, card in enumerate(page_cards):
+            row, col = divmod(index, cols)
+            x = x0 + col * (cw + gx)
+            y = y0 + row * (ch + gy)
+            already = counts.get(card.cid, 0)
+            limit = max_copies_of(card)
+            full = already >= limit
+            fill = "#2a3a4a" if full else "#2f3b56"
+            outline = RARITY_COLOR.get(card.rarity, "#39435c")
+            self.rrect(x, y, x + cw, y + ch, r=10, fill=fill, outline=outline, width=2)
+            c.create_text(x + 12, y + 12, text=str(card.cost), anchor="w", fill="#7fb2ff",
+                          font=self.f_body)
+            c.create_text(x + cw // 2, y + 12, text=card.name, fill=TEXT if not full else DIM,
+                          font=self.f_small, width=cw - 40)
+            typ = "随从" if card.is_minion else "法术"
+            c.create_text(x + cw // 2, y + 36, text=typ, fill=DIM, font=self.f_small)
+            c.create_text(x + cw // 2, y + 60, text=self.wrap(card.text, cw - 24),
+                          fill="#c2cee4" if not full else "#4a5a6c",
+                          font=self.f_small, justify="center")
+            if card.is_minion:
+                c.create_text(x + 16, y + ch - 16, text=str(card.attack), fill="#ffe6a7",
+                              font=self.f_body)
+                c.create_text(x + cw - 16, y + ch - 16, text=str(card.health), fill="#7fe08a",
+                              font=self.f_body)
+            if full:
+                c.create_text(x + cw // 2, y + ch - 16, text="已满", fill="#ff6b5a",
+                              font=self.f_small)
+            else:
+                self.add_hit((x, y, x + cw, y + ch), "builder_add", card.cid)
+
+        # 按钮
+        self.rrect(28, HEIGHT - 62, 148, HEIGHT - 20, r=12, fill=PANEL, outline="#39435c")
+        c.create_text(88, HEIGHT - 41, text="← 返回菜单", fill=TEXT, font=self.f_small)
+        self.add_hit((28, HEIGHT - 62, 148, HEIGHT - 20), "back_menu", None)
+        if pages > 1:
+            self.rrect(WIDTH // 2 - 160, HEIGHT - 62, WIDTH // 2 - 50, HEIGHT - 20, r=12,
+                       fill=PANEL, outline="#39435c")
+            c.create_text(WIDTH // 2 - 105, HEIGHT - 41, text="上一页", fill=TEXT,
+                          font=self.f_small)
+            self.add_hit((WIDTH // 2 - 160, HEIGHT - 62, WIDTH // 2 - 50, HEIGHT - 20),
+                         "build_prev", None)
+            self.rrect(WIDTH // 2 + 50, HEIGHT - 62, WIDTH // 2 + 160, HEIGHT - 20, r=12,
+                       fill=PANEL, outline="#39435c")
+            c.create_text(WIDTH // 2 + 105, HEIGHT - 41, text="下一页", fill=TEXT,
+                          font=self.f_small)
+            self.add_hit((WIDTH // 2 + 50, HEIGHT - 62, WIDTH // 2 + 160, HEIGHT - 20),
+                         "build_next", None)
+        save_color = GREEN if len(self.builder_cards) == DECK_SIZE else "#3a4356"
+        self.rrect(WIDTH - 284, HEIGHT - 62, WIDTH - 174, HEIGHT - 20, r=12,
+                   fill=save_color, outline="")
+        c.create_text(WIDTH - 229, HEIGHT - 41, text="保存套牌", fill=TEXT, font=self.f_small)
+        self.add_hit((WIDTH - 284, HEIGHT - 62, WIDTH - 174, HEIGHT - 20), "builder_save", None)
+        reset_fill = "#3a4356" if has_custom(self.builder_hero) else DIM
+        self.rrect(WIDTH - 160, HEIGHT - 62, WIDTH - 50, HEIGHT - 20, r=12,
+                   fill=reset_fill, outline="#39435c")
+        c.create_text(WIDTH - 105, HEIGHT - 41, text="重置为预组", fill=TEXT, font=self.f_small)
+        self.add_hit((WIDTH - 160, HEIGHT - 62, WIDTH - 50, HEIGHT - 20), "builder_reset", None)
+        if self.toast:
+            c.create_text(WIDTH // 2, HEIGHT - 78, text=self.toast, fill=GOLD,
+                          font=self.f_small)
 
     def start_game(self) -> None:
-        self.game = Game(self.player_hero, self.enemy_hero, ai_second=True)
+        self.game = Game(self.player_hero, self.enemy_hero, ai_second=True,
+                         deck_a=deck_for(self.player_hero),
+                         deck_b=deck_for(self.enemy_hero))
+        self.screen = "battle"
         self.selected_card = None
         self.selected_minion = None
         self.selected_index = None
@@ -168,9 +505,28 @@ class CardGameApp:
     # ---------- 战场渲染 ----------
 
 
+    def render_current_menu(self) -> None:
+        """按当前所处界面重绘（菜单 / 图鉴 / 构筑）。"""
+        if self.screen == "collection":
+            self.render_collection()
+        elif self.screen == "builder":
+            self.render_builder()
+        else:
+            self.render_menu()
+
+    def on_page(self, delta: int) -> None:
+        """方向键翻页，仅在图鉴与构筑界面生效。"""
+        if self.game is not None:
+            return
+        if self.screen == "collection":
+            self.col_page += delta
+            self.render_collection()
+        elif self.screen == "builder":
+            self.builder_page += delta
+            self.render_builder()
     def render(self) -> None:
         if self.game is None:
-            self.render_menu()
+            self.render_current_menu()
             return
         game = self.game
         c = self.canvas
@@ -454,14 +810,7 @@ class CardGameApp:
     def on_click(self, event) -> None:
         kind, ref = self.hit_test(event.x, event.y)
         if self.game is None:
-            if kind == "menu_hero":
-                self.player_hero = ref
-            elif kind == "menu_enemy":
-                self.enemy_hero = ref
-            elif kind == "menu_start":
-                self.start_game()
-                return
-            self.render_menu()
+            self.handle_menu_click(kind, ref)
             return
         if self.game.finished:
             if kind == "again":
@@ -474,6 +823,84 @@ class CardGameApp:
         self.handle_battle_click(kind, ref)
         self.render()
 
+    def handle_menu_click(self, kind, ref) -> None:
+        """主菜单、图鉴、构筑三个界面的点击分发。"""
+        if self.screen == "collection":
+            if kind == "col_card":
+                self.detail_card = ref
+            elif kind == "detail_close":
+                self.detail_card = None
+            elif kind == "col_filter":
+                self.col_filter = ref
+                self.col_page = 0
+            elif kind == "col_prev":
+                self.col_page -= 1
+            elif kind == "col_next":
+                self.col_page += 1
+            elif kind == "back_menu":
+                self.show_menu()
+                return
+            elif self.detail_card is not None:
+                self.detail_card = None
+            self.render_collection()
+            return
+        if self.screen == "builder":
+            if kind == "builder_add":
+                self.builder_add(ref)
+            elif kind == "builder_remove":
+                self.builder_remove(ref)
+            elif kind == "build_filter":
+                self.builder_filter = ref
+                self.builder_page = 0
+            elif kind == "build_prev":
+                self.builder_page -= 1
+            elif kind == "build_next":
+                self.builder_page += 1
+            elif kind == "builder_save":
+                ok, msg = save_deck(self.builder_hero, self.builder_cards)
+                self.toast = msg
+            elif kind == "builder_reset":
+                delete_deck(self.builder_hero)
+                self.builder_cards = list(HEROES[self.builder_hero].deck)
+                self.toast = "已恢复为预组套牌。"
+            elif kind == "back_menu":
+                self.show_menu()
+                return
+            self.render_builder()
+            return
+        # 主菜单
+        if kind == "menu_hero":
+            self.player_hero = ref
+        elif kind == "menu_enemy":
+            self.enemy_hero = ref
+        elif kind == "menu_start":
+            self.start_game()
+            return
+        elif kind == "menu_collection":
+            self.show_collection()
+            return
+        elif kind == "menu_builder":
+            self.show_builder()
+            return
+        self.render_menu()
+
+    def builder_add(self, cid: str) -> None:
+        if len(self.builder_cards) >= DECK_SIZE:
+            self.toast = f"套牌已满（{DECK_SIZE} 张），请先移除卡牌。"
+            return
+        card = get_card(cid)
+        already = self.builder_cards.count(cid)
+        if already >= max_copies_of(card):
+            self.toast = f"{card.name} 已达携带上限。"
+            return
+        self.builder_cards.append(cid)
+        self.builder_cards.sort(key=lambda c: (get_card(c).cost, get_card(c).name))
+        self.toast = f"加入 {card.name}。"
+
+    def builder_remove(self, cid: str) -> None:
+        if cid in self.builder_cards:
+            self.builder_cards.remove(cid)
+            self.toast = f"移除 {get_card(cid).name}。"
     def handle_battle_click(self, kind, ref) -> None:
         game = self.game
         me = game.players[0]

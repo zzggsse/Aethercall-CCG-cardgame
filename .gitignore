@@ -1,4 +1,4 @@
-﻿# Python
+# Python
 __pycache__/
 *.py[cod]
 *.pyo
@@ -23,3 +23,6 @@ env/
 # 系统文件
 Thumbs.db
 Desktop.ini
+
+# 玩家自定义套牌存档（运行时生成）
+decks.json
