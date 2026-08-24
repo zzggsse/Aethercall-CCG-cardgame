@@ -19,8 +19,21 @@ GREEN = "#4caf6a"
 RED = "#d1584c"
 BLUE = "#3f7fd1"
 
-CARD_W, CARD_H = 118, 164
-MINION_W, MINION_H = 106, 124
+CARD_W, CARD_H = 132, 186
+MINION_W, MINION_H = 106, 118
+
+# 布局：右侧日志栏之外的战场宽度
+BOARD_W = WIDTH - 250
+# 手牌收起时只露出顶部一角，抬升后完整展开
+HAND_VISIBLE = 42
+HAND_REST_Y = HEIGHT - HAND_VISIBLE
+HAND_LIFT_Y = HEIGHT - CARD_H - 12
+# 英雄面板与随从排的纵向位置，均在手牌上方，互不遮挡
+ENEMY_HERO_Y = 56
+ENEMY_ROW_Y = 168
+BOARD_MID = 300
+MY_ROW_Y = 312
+MY_HERO_Y = 444
 
 
 class CardGameApp:
@@ -52,6 +65,8 @@ class CardGameApp:
         self.pending_target_mode: str | None = None
         self.pending_kind: str | None = None
         self.hover: object | None = None
+        self.hover_index: int | None = None
+        self.selected_index: int | None = None
         self.status = ""
         self.player_hero = "mage"
         self.enemy_hero = "hunter"
@@ -143,12 +158,15 @@ class CardGameApp:
         self.game = Game(self.player_hero, self.enemy_hero, ai_second=True)
         self.selected_card = None
         self.selected_minion = None
+        self.selected_index = None
+        self.hover_index = None
         self.pending_target_mode = None
         self.pending_kind = None
         self.status = "你的回合，开始行动吧！"
         self.render()
 
     # ---------- 战场渲染 ----------
+
 
     def render(self) -> None:
         if self.game is None:
@@ -159,72 +177,81 @@ class CardGameApp:
         c.delete("all")
         self.hitboxes = []
         c.create_rectangle(0, 0, WIDTH, HEIGHT, fill=BG, outline="")
-        c.create_rectangle(0, 300, WIDTH - 250, 460, fill="#202a3c", outline="")
-        c.create_line(0, 380, WIDTH - 250, 380, fill="#2d3a4f")
+        c.create_rectangle(0, ENEMY_ROW_Y - 16, BOARD_W, MY_ROW_Y + MINION_H + 16,
+                           fill="#202a3c", outline="")
+        c.create_line(0, BOARD_MID, BOARD_W, BOARD_MID, fill="#2d3a4f")
 
         me = game.players[0]
         foe = game.players[1]
-        self.draw_hero(foe, 470, 60, enemy=True)
-        self.draw_hero(me, 470, 600, enemy=False)
-        self.draw_board(foe, 316, enemy=True)
-        self.draw_board(me, 396, enemy=False)
-        self.draw_hand(me)
+        self.draw_hero(foe, ENEMY_HERO_Y, enemy=True)
+        self.draw_hero(me, MY_HERO_Y, enemy=False)
+        self.draw_board(foe, ENEMY_ROW_Y, enemy=True)
+        self.draw_board(me, MY_ROW_Y, enemy=False)
         self.draw_side_panel(game)
         self.draw_status()
+        self.draw_hand(me)
         if game.finished:
             self.draw_result(game)
 
-    def draw_hero(self, player, x, y, enemy: bool) -> None:
+    def draw_hero(self, player, y: int, enemy: bool) -> None:
+        """绘制英雄面板与英雄技能，两者并排居中，不与手牌重叠。"""
         c = self.canvas
         hero = player.hero_entity
-        w, h = 190, 96
+        w, h = 200, 88
+        pw = 116
+        group = w + 20 + pw
+        x = (BOARD_W - group) // 2
         border = RED if enemy else BLUE
         active = (self.game.current == player.index) and not self.game.finished
-        self.rrect(x, y, x + w, y + h, r=14, fill=PANEL,
-                   outline=GOLD if active else border, width=3 if active else 2)
-        c.create_text(x + w // 2, y + 26, text=hero.hero.name, fill=TEXT, font=self.f_body)
-        c.create_text(x + w // 2, y + 50, text=f"{hero.hero.class_name}", fill=DIM,
-                      font=self.f_small)
-        c.create_text(x + 30, y + 76, text=f"♥ {max(0, hero.health)}", fill=RED, font=self.f_stat)
+        targetable = self.is_targetable(hero)
+        outline, width = (GOLD, 3) if active else (border, 2)
+        if targetable:
+            outline, width = "#ffd166", 4
+        self.rrect(x, y, x + w, y + h, r=14, fill=PANEL, outline=outline, width=width)
+        c.create_text(x + w // 2, y + 22, text=hero.hero.name, fill=TEXT, font=self.f_body)
+        c.create_text(x + w // 2, y + 44, text=hero.hero.class_name, fill=DIM, font=self.f_small)
+        c.create_text(x + 34, y + 68, text=f"♥ {max(0, hero.health)}", fill=RED, font=self.f_stat)
         if hero.armor:
-            c.create_text(x + 96, y + 76, text=f"🛡 {hero.armor}", fill="#9fb6d8", font=self.f_stat)
-        c.create_text(x + w - 40, y + 76, text=f"牌库 {len(player.deck)}", fill=DIM,
+            c.create_text(x + 100, y + 68, text=f"🛡 {hero.armor}", fill="#9fb6d8",
+                          font=self.f_stat)
+        c.create_text(x + w - 42, y + 68, text=f"牌库 {len(player.deck)}", fill=DIM,
                       font=self.f_small)
         if hero.frozen:
-            c.create_text(x + w - 26, y + 20, text="❄", fill="#7fd6ff", font=self.f_stat)
+            c.create_text(x + w - 22, y + 18, text="❄", fill="#7fd6ff", font=self.f_stat)
+        label = "对手" if enemy else "你"
+        c.create_text(x - 34, y + h // 2, text=label, fill=GOLD if not enemy else RED,
+                      font=self.f_body)
         self.add_hit((x, y, x + w, y + h), "hero", hero)
 
-        # 英雄技能按钮
-        px, py = x + w + 24, y + 12
+        px = x + w + 20
         usable = (not self.game.finished and self.game.current == player.index
                   and self.game.can_use_power(player) and not player.is_ai)
-        self.rrect(px, py, px + 108, py + 72, r=12, fill="#2c3a52",
+        used = player.power_used and not player.is_ai
+        self.rrect(px, y, px + pw, y + h, r=12, fill="#2c3a52",
                    outline=GOLD if usable else "#3a4659", width=2 if usable else 1)
-        c.create_text(px + 54, py + 24, text=hero.hero.power_name, fill=TEXT if usable else DIM,
-                      font=self.f_small)
-        c.create_text(px + 54, py + 50, text=f"{hero.hero.power_cost} 费",
+        c.create_text(px + pw // 2, y + 20, text="英雄技能", fill=DIM, font=self.f_small)
+        c.create_text(px + pw // 2, y + 44, text=hero.hero.power_name,
+                      fill=TEXT if usable else DIM, font=self.f_small, width=pw - 12)
+        note = "已使用" if used else f"{hero.hero.power_cost} 费"
+        c.create_text(px + pw // 2, y + 70, text=note,
                       fill=GOLD if usable else DIM, font=self.f_small)
         if not player.is_ai:
-            self.add_hit((px, py, px + 108, py + 72), "power", player)
-
-        # 手牌数
-        c.create_text(x - 60, y + h // 2, text=f"手牌\n{len(player.hand)}", fill=DIM,
-                      font=self.f_small, justify="center")
+            self.add_hit((px, y, px + pw, y + h), "power", player)
 
     def draw_board(self, player, y: int, enemy: bool) -> None:
         c = self.canvas
         board = [m for m in player.board if not m.dead]
         if not board:
-            c.create_text((WIDTH - 250) // 2, y + MINION_H // 2 - 20,
+            c.create_text(BOARD_W // 2, y + MINION_H // 2,
                           text="（空场）", fill="#48536b", font=self.f_small)
             return
         gap = 12
-        total = len(board) * MINION_W + (len(board) - 1) * gap
-        x = ((WIDTH - 250) - total) // 2
-        top = y - 60 if enemy else y
+        step = min(MINION_W + gap, (BOARD_W - 80) // max(1, len(board)))
+        total = step * (len(board) - 1) + MINION_W
+        x = (BOARD_W - total) // 2
         for minion in board:
-            self.draw_minion(minion, x, top, enemy)
-            x += MINION_W + gap
+            self.draw_minion(minion, x, y, enemy)
+            x += step
 
     def draw_minion(self, minion: Minion, x: int, y: int, enemy: bool) -> None:
         c = self.canvas
@@ -234,8 +261,7 @@ class CardGameApp:
         ready = (not enemy and game.current == 0 and game.minion_can_attack(minion)
                  and not game.finished)
         targetable = self.is_targetable(minion)
-        outline = "#3a4659"
-        width = 1
+        outline, width = "#3a4659", 1
         if minion.taunt:
             outline, width = "#b98a3f", 2
         if ready:
@@ -246,7 +272,7 @@ class CardGameApp:
             outline, width = GOLD, 4
         self.rrect(x, y, x + MINION_W, y + MINION_H, r=12, fill="#2b3550",
                    outline=outline, width=width)
-        c.create_text(x + MINION_W // 2, y + 24, text=minion.name, fill=TEXT,
+        c.create_text(x + MINION_W // 2, y + 22, text=minion.name, fill=TEXT,
                       font=self.f_small, width=MINION_W - 12)
         tags = []
         if minion.taunt:
@@ -257,59 +283,90 @@ class CardGameApp:
             tags.append("冲锋")
         if minion.frozen:
             tags.append("冻结")
-        c.create_text(x + MINION_W // 2, y + 62, text=" · ".join(tags), fill="#9db2d6",
+        c.create_text(x + MINION_W // 2, y + 58, text=" · ".join(tags), fill="#9db2d6",
                       font=self.f_small, width=MINION_W - 8)
-        c.create_text(x + 20, y + MINION_H - 20, text=str(attack),
+        c.create_text(x + 18, y + MINION_H - 18, text=str(attack),
                       fill=GOLD if attack != minion.card.attack else "#ffe6a7", font=self.f_stat)
         hp_color = RED if minion.health < minion.max_health else "#7fe08a"
-        c.create_text(x + MINION_W - 20, y + MINION_H - 20, text=str(minion.health),
+        c.create_text(x + MINION_W - 18, y + MINION_H - 18, text=str(minion.health),
                       fill=hp_color, font=self.f_stat)
         if ready:
-            c.create_text(x + MINION_W // 2, y + MINION_H - 20, text="可攻击", fill=GREEN,
+            c.create_text(x + MINION_W // 2, y + MINION_H - 18, text="可攻击", fill=GREEN,
                           font=self.f_small)
         self.add_hit((x, y, x + MINION_W, y + MINION_H), "minion", minion)
 
-    def draw_hand(self, player) -> None:
-        c = self.canvas
+    # ---------- 手牌：默认只露出顶部一角，悬停/选中时抬升展开 ----------
+
+    def hand_layout(self, player) -> list[tuple[int, Card, int, int, bool]]:
+        """返回手牌布局：(序号, 卡牌, x, y, 是否抬升)。抬升的牌完整展开。"""
         hand = player.hand
         if not hand:
-            return
-        gap = 8
-        avail = WIDTH - 300
-        step = min(CARD_W + gap, avail // max(1, len(hand)))
+            return []
+        gap = 10
+        avail = BOARD_W - 40
+        step = min(CARD_W + gap, (avail - CARD_W) // max(1, len(hand) - 1)) if len(hand) > 1 \
+            else CARD_W
         total = step * (len(hand) - 1) + CARD_W
-        x = (avail - total) // 2 + 20
-        y = HEIGHT - CARD_H - 6
-        for card in hand:
-            self.draw_card(card, x, y, player)
-            x += step
+        start = (avail - total) // 2 + 20
+        layout = []
+        for index, card in enumerate(hand):
+            lifted = index in (self.hover_index, self.selected_index)
 
-    def draw_card(self, card: Card, x: int, y: int, player) -> None:
+            y = HAND_LIFT_Y if lifted else HAND_REST_Y
+            layout.append((index, card, start + index * step, y, lifted))
+        return layout
+
+    def draw_hand(self, player) -> None:
+        """先画未抬升的牌，再画抬升的牌，保证放大的牌显示在最上层。"""
+        layout = self.hand_layout(player)
+        if not layout:
+            return
+        self.canvas.create_rectangle(0, HAND_REST_Y - 14, BOARD_W, HEIGHT,
+                                     fill="#161d29", outline="")
+        self.canvas.create_line(0, HAND_REST_Y - 14, BOARD_W, HAND_REST_Y - 14,
+                                fill="#333e54")
+        for index, card, x, y, lifted in layout:
+            if not lifted:
+                self.draw_card(index, card, x, y, player, lifted=False)
+        for index, card, x, y, lifted in layout:
+            if lifted:
+                self.draw_card(index, card, x, y, player, lifted=True)
+
+    def draw_card(self, index: int, card: Card, x: int, y: int, player,
+                  lifted: bool) -> None:
         c = self.canvas
         game = self.game
         playable = (game.current == 0 and not game.finished and game.can_play(player, card))
-        selected = card is self.selected_card
+        selected = index == self.selected_index
+        w, h = CARD_W, CARD_H
         fill = "#2f3b56" if playable else "#242c3d"
         outline = GOLD if selected else (GREEN if playable else "#39435c")
-        self.rrect(x, y, x + CARD_W, y + CARD_H, r=12, fill=fill, outline=outline,
-                   width=3 if selected else (2 if playable else 1))
-        self.canvas.create_oval(x - 2, y - 2, x + 30, y + 30,
-                                fill="#2f6fd0" if card.cost <= player.mana else "#4a5268",
-                                outline=GOLD)
-        c.create_text(x + 14, y + 14, text=str(card.cost), fill="#ffffff", font=self.f_body)
-        c.create_text(x + CARD_W // 2, y + 44, text=card.name, fill=TEXT, font=self.f_body,
-                      width=CARD_W - 16)
-        kind = "随从" if card.is_minion else "法术"
-        c.create_text(x + CARD_W // 2, y + 68, text=kind, fill=DIM, font=self.f_small)
-        c.create_text(x + CARD_W // 2, y + 104, text=self.wrap(card.text, CARD_W - 16),
-                      fill="#c2cee4", font=self.f_small, justify="center")
-        if card.is_minion:
-            c.create_text(x + 18, y + CARD_H - 18, text=str(card.attack), fill="#ffe6a7",
-                          font=self.f_stat)
-            c.create_text(x + CARD_W - 18, y + CARD_H - 18, text=str(card.health), fill="#7fe08a",
-                          font=self.f_stat)
-        self.add_hit((x, y, x + CARD_W, y + CARD_H), "hand", card)
-
+        width = 3 if selected else (2 if playable else 1)
+        if lifted:
+            c.create_rectangle(x + 4, y + 8, x + w + 6, y + h, fill="#0d1219", outline="")
+        self.rrect(x, y, x + w, y + h, r=12, fill=fill, outline=outline, width=width)
+        # 费用宝石始终位于卡牌顶部，收起状态下也能看清
+        c.create_oval(x + 4, y + 4, x + 36, y + 36,
+                      fill="#2f6fd0" if card.cost <= player.mana else "#4a5268", outline=GOLD)
+        c.create_text(x + 20, y + 20, text=str(card.cost), fill="#ffffff", font=self.f_body)
+        c.create_text(x + w // 2 + 14, y + 20, text=card.name, fill=TEXT, font=self.f_small,
+                      width=w - 48)
+        if lifted:
+            kind = "随从" if card.is_minion else "法术"
+            c.create_text(x + w // 2, y + 52, text=kind, fill=DIM, font=self.f_small)
+            c.create_text(x + w // 2, y + 96, text=self.wrap(card.text, w - 16),
+                          fill="#c2cee4", font=self.f_small, justify="center")
+            if card.is_minion:
+                c.create_text(x + 18, y + h - 18, text=str(card.attack), fill="#ffe6a7",
+                              font=self.f_stat)
+                c.create_text(x + w - 18, y + h - 18, text=str(card.health), fill="#7fe08a",
+                              font=self.f_stat)
+            hint = "点击目标生效" if selected else ("可打出" if playable else "无法打出")
+            c.create_text(x + w // 2, y + 70, text=hint,
+                          fill=GOLD if selected else (GREEN if playable else DIM),
+                          font=self.f_small)
+        bottom = y + h if lifted else y + HAND_VISIBLE
+        self.add_hit((x, y, x + w, bottom), "hand", (index, card))
     def draw_side_panel(self, game: Game) -> None:
         c = self.canvas
         x0 = WIDTH - 240
@@ -339,10 +396,10 @@ class CardGameApp:
             self.add_hit((x0 + 30, HEIGHT - 88, WIDTH - 40, HEIGHT - 40), "end_turn", None)
 
     def draw_status(self) -> None:
-        self.canvas.create_text(20, 20, text=self.status, anchor="nw", fill=GOLD,
-                                font=self.f_body, width=420)
+        self.canvas.create_text(18, 14, text=self.status, anchor="nw", fill=GOLD,
+                                font=self.f_body, width=300)
         if self.pending_target_mode:
-            self.canvas.create_text(20, 48, text="请选择目标（右键或点击空白取消）", anchor="nw",
+            self.canvas.create_text(18, 58, text="请选择目标（点击空白处取消）", anchor="nw",
                                     fill="#ffd166", font=self.f_small)
 
     def draw_result(self, game: Game) -> None:
@@ -388,6 +445,11 @@ class CardGameApp:
         kind, ref = self.hit_test(event.x, event.y)
         cursor = "hand2" if kind else ""
         self.canvas.configure(cursor=cursor)
+        hovered = ref[0] if kind == "hand" else None
+        if hovered != self.hover_index:
+            self.hover_index = hovered
+            if self.game is not None:
+                self.render()
 
     def on_click(self, event) -> None:
         kind, ref = self.hit_test(event.x, event.y)
@@ -422,7 +484,10 @@ class CardGameApp:
             self.on_end_turn()
             return
         if kind == "hand":
-            card: Card = ref
+            index, card = ref
+            if index == self.selected_index:
+                self.clear_selection("已取消选择。")
+                return
             if not game.can_play(me, card):
                 self.status = f"{card.name} 现在无法打出（法力不足或没有合法目标）。"
                 return
@@ -430,11 +495,13 @@ class CardGameApp:
             if card.targeting == "none":
                 game.play_card(me, card)
                 self.selected_card = None
+                self.selected_index = None
                 self.pending_target_mode = None
                 self.status = f"打出了 {card.name}。"
                 self.after_player_action()
             else:
                 self.selected_card = card
+                self.selected_index = index
                 self.pending_kind = "card"
                 self.pending_target_mode = card.targeting
                 self.status = f"{card.name}：请选择目标。"
@@ -494,6 +561,8 @@ class CardGameApp:
     def clear_selection(self, status: str = "") -> None:
         self.selected_card = None
         self.selected_minion = None
+        self.hover_index = None
+        self.selected_index = None
         self.pending_target_mode = None
         self.pending_kind = None
         if status:
