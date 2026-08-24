@@ -1,0 +1,1 @@
+"""Aethercall CCG core package."""
